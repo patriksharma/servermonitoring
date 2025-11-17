@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: monitoring-test-server
+    env: python
+    buildCommand: pip install -r requirements_deploy.txt
+    startCommand: gunicorn real_server_deploy:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SECRET_KEY
+        generateValue: true
