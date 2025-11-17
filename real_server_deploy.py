@@ -224,7 +224,11 @@ def home():
                 3. Share with 2-3 friends to test<br>
                 4. Click "Simulate Transaction" to add transactions<br>
                 5. Watch metrics update in real-time<br>
-                6. Check your monitoring system for REAL data!
+                6. Check your monitoring system for REAL data!<br>
+                <br>
+                <strong>🔗 Quick Links:</strong><br>
+                📊 <a href="/status" style="color: #2563eb; text-decoration: underline;">Service Status Page</a> - Professional status dashboard<br>
+                🧪 <a href="/test-controls" style="color: #2563eb; text-decoration: underline;">Error Testing Controls</a> - Test Slack alerts
             </div>
         </div>
         
@@ -416,6 +420,400 @@ def simulate_crash():
     Use this to test server down alerts
     """
     raise Exception("Simulated server crash - testing error handling")
+
+@app.route('/api/status')
+def api_status():
+    """
+    JSON API for status (for external monitoring)
+    """
+    services = []
+    overall_status = "operational"
+    
+    # Check all services
+    try:
+        services.append({"name": "Web Server", "status": "operational"})
+    except:
+        services.append({"name": "Web Server", "status": "down"})
+        overall_status = "down"
+    
+    try:
+        get_connected_users()
+        services.append({"name": "API Services", "status": "operational"})
+    except:
+        services.append({"name": "API Services", "status": "degraded"})
+        overall_status = "degraded"
+    
+    if USE_REDIS:
+        try:
+            r.ping()
+            services.append({"name": "Redis Cache", "status": "operational"})
+        except:
+            services.append({"name": "Redis Cache", "status": "down"})
+            overall_status = "degraded"
+    
+    if force_critical:
+        services.append({"name": "Health Check", "status": "critical", "error": critical_error_message})
+        overall_status = "critical"
+    else:
+        services.append({"name": "Health Check", "status": "operational"})
+    
+    return jsonify({
+        "overall_status": overall_status,
+        "services": services,
+        "metrics": {
+            "connected_users": get_connected_users(),
+            "transactions_per_minute": get_transactions_per_minute(),
+            "response_time_ms": get_average_response_time(),
+            "uptime_seconds": int(time.time() - start_time)
+        },
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/status')
+def status_page():
+    """
+    Public status page showing all services health
+    Similar to status.mongodb.com
+    """
+    # Check all services
+    services_status = []
+    overall_status = "operational"
+    
+    # Check main server
+    try:
+        services_status.append({
+            "name": "Web Server",
+            "status": "operational",
+            "description": "Main application server"
+        })
+    except:
+        services_status.append({
+            "name": "Web Server",
+            "status": "down",
+            "description": "Main application server"
+        })
+        overall_status = "down"
+    
+    # Check API endpoints
+    try:
+        users = get_connected_users()
+        services_status.append({
+            "name": "API Services",
+            "status": "operational",
+            "description": "REST API endpoints"
+        })
+    except:
+        services_status.append({
+            "name": "API Services",
+            "status": "degraded",
+            "description": "REST API endpoints"
+        })
+        overall_status = "degraded"
+    
+    # Check database/storage
+    if USE_REDIS:
+        try:
+            r.ping()
+            services_status.append({
+                "name": "Redis Cache",
+                "status": "operational",
+                "description": "Data caching layer"
+            })
+        except:
+            services_status.append({
+                "name": "Redis Cache",
+                "status": "down",
+                "description": "Data caching layer"
+            })
+            overall_status = "degraded"
+    else:
+        services_status.append({
+            "name": "In-Memory Storage",
+            "status": "operational",
+            "description": "Temporary data storage"
+        })
+    
+    # Check monitoring endpoint
+    try:
+        tpm = get_transactions_per_minute()
+        services_status.append({
+            "name": "Monitoring & Metrics",
+            "status": "operational",
+            "description": "Real-time metrics tracking"
+        })
+    except:
+        services_status.append({
+            "name": "Monitoring & Metrics",
+            "status": "degraded",
+            "description": "Real-time metrics tracking"
+        })
+    
+    # Check if forced critical
+    if force_critical:
+        services_status.append({
+            "name": "Health Check System",
+            "status": "critical",
+            "description": f"Critical error: {critical_error_message}"
+        })
+        overall_status = "critical"
+    else:
+        services_status.append({
+            "name": "Health Check System",
+            "status": "operational",
+            "description": "Service health monitoring"
+        })
+    
+    # Add uptime info
+    uptime_hours = int((time.time() - start_time) / 3600)
+    uptime_minutes = int((time.time() - start_time) / 60) % 60
+    
+    return f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Service Status</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }}
+            
+            .container {{
+                max-width: 900px;
+                margin: 0 auto;
+            }}
+            
+            .header {{
+                background: white;
+                border-radius: 12px 12px 0 0;
+                padding: 40px;
+                text-align: center;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            
+            .header h1 {{
+                color: #1e293b;
+                font-size: 32px;
+                margin-bottom: 10px;
+            }}
+            
+            .header p {{
+                color: #64748b;
+                font-size: 16px;
+            }}
+            
+            .overall-status {{
+                background: {"#10b981" if overall_status == "operational" else "#ef4444" if overall_status == "down" else "#f59e0b"};
+                color: white;
+                padding: 30px;
+                text-align: center;
+                font-size: 24px;
+                font-weight: 600;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            
+            .services {{
+                background: white;
+                border-radius: 0 0 12px 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                overflow: hidden;
+            }}
+            
+            .service-item {{
+                padding: 24px 40px;
+                border-bottom: 1px solid #e2e8f0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                transition: background 0.2s;
+            }}
+            
+            .service-item:hover {{
+                background: #f8fafc;
+            }}
+            
+            .service-item:last-child {{
+                border-bottom: none;
+            }}
+            
+            .service-info {{
+                flex: 1;
+            }}
+            
+            .service-name {{
+                font-size: 18px;
+                font-weight: 600;
+                color: #1e293b;
+                margin-bottom: 5px;
+            }}
+            
+            .service-description {{
+                font-size: 14px;
+                color: #64748b;
+            }}
+            
+            .service-status {{
+                padding: 8px 20px;
+                border-radius: 20px;
+                font-size: 14px;
+                font-weight: 600;
+                text-transform: capitalize;
+            }}
+            
+            .status-operational {{
+                background: #d1fae5;
+                color: #065f46;
+            }}
+            
+            .status-degraded {{
+                background: #fef3c7;
+                color: #92400e;
+            }}
+            
+            .status-down {{
+                background: #fee2e2;
+                color: #991b1b;
+            }}
+            
+            .status-critical {{
+                background: #fee2e2;
+                color: #991b1b;
+            }}
+            
+            .footer {{
+                background: white;
+                margin-top: 30px;
+                padding: 30px 40px;
+                border-radius: 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            
+            .footer-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+            }}
+            
+            .footer-item {{
+                text-align: center;
+            }}
+            
+            .footer-label {{
+                color: #64748b;
+                font-size: 14px;
+                margin-bottom: 8px;
+            }}
+            
+            .footer-value {{
+                color: #1e293b;
+                font-size: 24px;
+                font-weight: 600;
+            }}
+            
+            .refresh-note {{
+                text-align: center;
+                color: white;
+                margin-top: 20px;
+                font-size: 14px;
+                opacity: 0.9;
+            }}
+            
+            @media (max-width: 768px) {{
+                .header {{
+                    padding: 30px 20px;
+                }}
+                
+                .header h1 {{
+                    font-size: 24px;
+                }}
+                
+                .overall-status {{
+                    padding: 20px;
+                    font-size: 20px;
+                }}
+                
+                .service-item {{
+                    padding: 20px;
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 15px;
+                }}
+                
+                .footer {{
+                    padding: 20px;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🚀 Service Status Dashboard</h1>
+                <p>Real-time monitoring of all services and components</p>
+            </div>
+            
+            <div class="overall-status">
+                {"✅ All Systems Operational" if overall_status == "operational" else "⚠️ Some Systems Degraded" if overall_status == "degraded" else "🚨 System Issues Detected"}
+            </div>
+            
+            <div class="services">
+                {"".join([f'''
+                <div class="service-item">
+                    <div class="service-info">
+                        <div class="service-name">{service["name"]}</div>
+                        <div class="service-description">{service["description"]}</div>
+                    </div>
+                    <div class="service-status status-{service["status"]}">
+                        {service["status"].title()}
+                    </div>
+                </div>
+                ''' for service in services_status])}
+            </div>
+            
+            <div class="footer">
+                <div class="footer-grid">
+                    <div class="footer-item">
+                        <div class="footer-label">Connected Users</div>
+                        <div class="footer-value">{get_connected_users()}</div>
+                    </div>
+                    <div class="footer-item">
+                        <div class="footer-label">Transactions/Min</div>
+                        <div class="footer-value">{get_transactions_per_minute()}</div>
+                    </div>
+                    <div class="footer-item">
+                        <div class="footer-label">Response Time</div>
+                        <div class="footer-value">{get_average_response_time()} ms</div>
+                    </div>
+                    <div class="footer-item">
+                        <div class="footer-label">Uptime</div>
+                        <div class="footer-value">{uptime_hours}h {uptime_minutes}m</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="refresh-note">
+                Page auto-refreshes every 30 seconds
+            </div>
+        </div>
+        
+        <script>
+            // Auto-refresh every 30 seconds
+            setTimeout(() => {{
+                location.reload();
+            }}, 30000);
+        </script>
+    </body>
+    </html>
+    '''
 
 @app.route('/test-controls')
 def test_controls():
