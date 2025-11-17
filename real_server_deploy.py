@@ -15,14 +15,41 @@ from collections import defaultdict
 app = Flask(__name__)
 CORS(app)
 
+# Middleware to track response times
+@app.before_request
+def start_timer():
+    """Start timing the request"""
+    from flask import g
+    g.start_time = time.time()
+
+@app.after_request
+def track_response_time(response):
+    """Track response time after each request"""
+    from flask import g
+    if hasattr(g, 'start_time'):
+        elapsed_ms = (time.time() - g.start_time) * 1000
+        response_times.append(elapsed_ms)
+        # Keep only last 100 response times
+        if len(response_times) > 100:
+            response_times.pop(0)
+    return response
+
 # Track server start time
 start_time = time.time()
+
+# Configuration
+USER_TIMEOUT_SECONDS = 30  # Users inactive for 30 seconds are removed
+
+# Testing variables - for simulating errors
+force_critical = False
+critical_error_message = None
 
 # In-memory storage (for free tier without Redis)
 # In production, use Redis for persistence
 visit_log = []  # List of {timestamp, user_id}
 page_views = defaultdict(int)
 transaction_log = []  # List of transaction timestamps
+response_times = []  # List of response times for tracking
 
 # Try to connect to Redis if available, otherwise use in-memory
 try:
@@ -58,29 +85,29 @@ def track_user_visit():
     timestamp = time.time()
     
     if USE_REDIS:
-        # Store in Redis with 5 minute expiry
+        # Store in Redis with 30 second expiry
         r.hset(f'user:{user_id}', 'last_seen', timestamp)
-        r.expire(f'user:{user_id}', 300)  # 5 minutes
+        r.expire(f'user:{user_id}', USER_TIMEOUT_SECONDS)
     else:
         # Store in memory - update existing user or add new
         # Remove old entries for this user
         visit_log[:] = [v for v in visit_log if v['user_id'] != user_id]
         # Add new entry
         visit_log.append({'timestamp': timestamp, 'user_id': user_id})
-        # Clean old visits (older than 5 minutes)
-        cutoff = time.time() - 300
+        # Clean old visits (older than timeout)
+        cutoff = time.time() - USER_TIMEOUT_SECONDS
         visit_log[:] = [v for v in visit_log if v['timestamp'] > cutoff]
 
 def get_connected_users():
-    """Get count of users active in last 5 minutes - REAL"""
+    """Get count of users active in last 30 seconds - REAL"""
     if USE_REDIS:
         count = 0
         for key in r.scan_iter('user:*'):
             count += 1
         return count
     else:
-        # Count unique users in last 5 minutes
-        cutoff = time.time() - 300
+        # Count unique users in last 30 seconds
+        cutoff = time.time() - USER_TIMEOUT_SECONDS
         active_users = set(v['user_id'] for v in visit_log if v['timestamp'] > cutoff)
         return len(active_users)
 
@@ -112,6 +139,12 @@ def get_total_transactions():
         return int(r.get('total_transactions') or 0)
     else:
         return len(transaction_log)
+
+def get_average_response_time():
+    """Get average response time from tracked responses - REAL"""
+    if not response_times:
+        return 0
+    return round(sum(response_times) / len(response_times), 2)
 
 # ==============================================================================
 # ROUTES
@@ -204,7 +237,7 @@ def home():
                     <div class="metric">
                         <h3>👥 Connected Users</h3>
                         <p>${data.connected_users}</p>
-                        <small>Users active in last 5 minutes</small>
+                        <small>Users active in last 30 seconds</small>
                     </div>
                     <div class="metric">
                         <h3>📈 Transactions/Minute</h3>
@@ -270,17 +303,25 @@ def ping():
         tpm = get_transactions_per_minute()
         total = get_total_transactions()
         uptime = int(time.time() - start_time)
+        response_time = get_average_response_time()
         
         # Check if services are healthy
         is_healthy = True
         error_msg = None
+        error_code = None
         
-        if USE_REDIS:
+        # Check for forced critical state (for testing)
+        if force_critical:
+            is_healthy = False
+            error_msg = critical_error_message
+            error_code = "SIMULATED_ERROR"
+        elif USE_REDIS:
             try:
                 r.ping()
             except:
                 is_healthy = False
                 error_msg = "Redis connection lost"
+                error_code = "REDIS_CONNECTION_ERROR"
         
         response = {
             "status": "healthy" if is_healthy else "critical",
@@ -290,7 +331,7 @@ def ping():
                 "connected_users": users,
                 "total_transactions": total,
                 "uptime_seconds": uptime,
-                "response_time_ms": 50  # Real would be tracked in middleware
+                "response_time_ms": response_time
             },
             "server": "render-test-server",
             "version": "1.0.0",
@@ -299,7 +340,7 @@ def ping():
         
         if not is_healthy:
             response["error"] = error_msg
-            response["error_code"] = "REDIS_CONNECTION_ERROR"
+            response["error_code"] = error_code
             return jsonify(response), 503
         
         return jsonify(response), 200
@@ -316,6 +357,264 @@ def ping():
 def health():
     """Simple health check"""
     return jsonify({"status": "ok"}), 200
+
+# ==============================================================================
+# TESTING ENDPOINTS - Simulate errors to test Slack alerts
+# ==============================================================================
+
+@app.route('/simulate-error', methods=['POST'])
+def simulate_error():
+    """
+    Force server into critical state to test alerts
+    POST to this endpoint to trigger critical error
+    """
+    global force_critical, critical_error_message
+    
+    error_type = request.json.get('error_type', 'database') if request.json else 'database'
+    
+    error_messages = {
+        'database': 'Database connection pool exhausted',
+        'memory': 'Memory usage critical - 95% used',
+        'disk': 'Disk space critical - 98% full',
+        'api': 'External API timeout - payment gateway unreachable',
+        'cpu': 'CPU usage critical - 99% sustained load'
+    }
+    
+    force_critical = True
+    critical_error_message = error_messages.get(error_type, 'Unknown critical error')
+    
+    return jsonify({
+        'message': 'Server forced into CRITICAL state',
+        'error': critical_error_message,
+        'note': 'Check /ping endpoint - it will return critical status',
+        'restore': 'POST to /force-healthy to restore'
+    }), 200
+
+@app.route('/force-healthy', methods=['POST'])
+def force_healthy():
+    """Restore server to healthy state"""
+    global force_critical, critical_error_message
+    
+    force_critical = False
+    critical_error_message = None
+    
+    return jsonify({
+        'message': 'Server restored to HEALTHY state',
+        'note': 'Check /ping endpoint - it will return healthy status'
+    }), 200
+
+@app.route('/simulate-crash', methods=['POST'])
+def simulate_crash():
+    """
+    Simulate a server crash (raises exception)
+    Use this to test server down alerts
+    """
+    raise Exception("Simulated server crash - testing error handling")
+
+@app.route('/test-controls')
+def test_controls():
+    """
+    Web interface to test error scenarios
+    """
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Error Testing Controls</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+                max-width: 800px;
+                margin: 50px auto;
+                padding: 20px;
+                background: #f5f5f5;
+            }
+            .container {
+                background: white;
+                padding: 40px;
+                border-radius: 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            h1 { color: #dc2626; }
+            h2 { color: #2563eb; margin-top: 30px; }
+            .button-group {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                margin: 20px 0;
+            }
+            button {
+                padding: 12px 24px;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 16px;
+                font-weight: 500;
+            }
+            .error-btn {
+                background: #dc2626;
+                color: white;
+            }
+            .error-btn:hover {
+                background: #b91c1c;
+            }
+            .success-btn {
+                background: #16a34a;
+                color: white;
+            }
+            .success-btn:hover {
+                background: #15803d;
+            }
+            .warning {
+                background: #fef3c7;
+                padding: 15px;
+                border-radius: 8px;
+                margin: 20px 0;
+                border-left: 4px solid #f59e0b;
+            }
+            .info {
+                background: #dbeafe;
+                padding: 15px;
+                border-radius: 8px;
+                margin: 20px 0;
+                border-left: 4px solid #2563eb;
+            }
+            #status {
+                margin-top: 20px;
+                padding: 15px;
+                border-radius: 8px;
+                font-weight: bold;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🧪 Error Testing Controls</h1>
+            <p>Use these controls to simulate server errors and test your Slack alerts!</p>
+            
+            <div class="warning">
+                <strong>⚠️ Note:</strong> These controls will trigger REAL alerts in Slack.
+                Make sure your monitoring script is running!
+            </div>
+            
+            <h2>🔴 Simulate Critical Errors</h2>
+            <p>These will make /ping return "critical" status with error messages:</p>
+            
+            <div class="button-group">
+                <button class="error-btn" onclick="simulateError('database')">
+                    🗄️ Database Error
+                </button>
+                <button class="error-btn" onclick="simulateError('memory')">
+                    🧠 Memory Critical
+                </button>
+                <button class="error-btn" onclick="simulateError('disk')">
+                    💾 Disk Full
+                </button>
+                <button class="error-btn" onclick="simulateError('api')">
+                    🔌 API Timeout
+                </button>
+                <button class="error-btn" onclick="simulateError('cpu')">
+                    ⚡ CPU Overload
+                </button>
+            </div>
+            
+            <h2>✅ Restore to Healthy</h2>
+            <p>Click this to restore server to healthy state:</p>
+            
+            <button class="success-btn" onclick="forceHealthy()">
+                ✅ Restore Healthy Status
+            </button>
+            
+            <div class="info">
+                <strong>📊 How to test:</strong><br>
+                1. Make sure your monitor.py is running<br>
+                2. Click any error button above<br>
+                3. Wait 30 seconds (next monitoring check)<br>
+                4. Check Slack for critical alert with error details<br>
+                5. Click "Restore Healthy Status"<br>
+                6. Check Slack for recovery alert
+            </div>
+            
+            <h2>📍 Check Current Status</h2>
+            <button class="success-btn" onclick="checkStatus()">
+                🔍 Check /ping Status
+            </button>
+            
+            <div id="status"></div>
+        </div>
+        
+        <script>
+            async function simulateError(type) {
+                try {
+                    const response = await fetch('/simulate-error', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({error_type: type})
+                    });
+                    const data = await response.json();
+                    
+                    document.getElementById('status').innerHTML = `
+                        <div style="background: #fee2e2; color: #991b1b; padding: 15px; border-radius: 8px;">
+                            <strong>🚨 CRITICAL ERROR ACTIVATED</strong><br>
+                            Error: ${data.error}<br>
+                            <small>Your monitoring script should detect this in ~30 seconds</small>
+                        </div>
+                    `;
+                    
+                    alert('✅ Critical error activated!\\n\\nError: ' + data.error + '\\n\\nCheck Slack in 30 seconds for alert!');
+                } catch (error) {
+                    alert('❌ Failed: ' + error);
+                }
+            }
+            
+            async function forceHealthy() {
+                try {
+                    const response = await fetch('/force-healthy', {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    
+                    document.getElementById('status').innerHTML = `
+                        <div style="background: #dcfce7; color: #166534; padding: 15px; border-radius: 8px;">
+                            <strong>✅ SERVER RESTORED TO HEALTHY</strong><br>
+                            <small>Your monitoring script should detect recovery in ~30 seconds</small>
+                        </div>
+                    `;
+                    
+                    alert('✅ Server restored to healthy!\\n\\nCheck Slack in 30 seconds for recovery alert!');
+                } catch (error) {
+                    alert('❌ Failed: ' + error);
+                }
+            }
+            
+            async function checkStatus() {
+                try {
+                    const response = await fetch('/ping');
+                    const data = await response.json();
+                    
+                    const isHealthy = data.status === 'healthy';
+                    const bgColor = isHealthy ? '#dcfce7' : '#fee2e2';
+                    const textColor = isHealthy ? '#166534' : '#991b1b';
+                    
+                    document.getElementById('status').innerHTML = `
+                        <div style="background: ${bgColor}; color: ${textColor}; padding: 15px; border-radius: 8px;">
+                            <strong>Status: ${data.status.toUpperCase()}</strong><br>
+                            ${data.error ? 'Error: ' + data.error + '<br>' : ''}
+                            Connected Users: ${data.metrics.connected_users}<br>
+                            Transactions/Min: ${data.metrics.transactions_per_minute}<br>
+                            Response Time: ${data.metrics.response_time_ms}ms<br>
+                            Uptime: ${Math.floor(data.metrics.uptime_seconds / 60)} minutes
+                        </div>
+                    `;
+                } catch (error) {
+                    alert('❌ Failed to check status: ' + error);
+                }
+            }
+        </script>
+    </body>
+    </html>
+    '''
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
