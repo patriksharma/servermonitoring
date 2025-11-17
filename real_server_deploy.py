@@ -343,7 +343,9 @@ def ping():
                 "uptime_seconds": uptime,
                 "response_time_ms": response_time
             },
-            "server": "render-test-server",
+            "name": "render-test-server",
+            "url": request.host_url.rstrip('/'),  
+             "host": request.host,     
             "version": "1.0.0",
             "storage": "redis" if USE_REDIS else "memory"
         }
