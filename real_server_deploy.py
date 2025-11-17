@@ -250,6 +250,11 @@ def home():
                         <small>All time</small>
                     </div>
                     <div class="metric">
+                        <h3>⚡ Response Time</h3>
+                        <p>${data.response_time_ms || 0} ms</p>
+                        <small>Average of last 100 requests</small>
+                    </div>
+                    <div class="metric">
                         <h3>⏱️ Uptime</h3>
                         <p>${Math.floor(data.uptime_seconds / 60)} minutes</p>
                         <small>${data.uptime_seconds} seconds</small>
@@ -280,7 +285,8 @@ def api_metrics():
         'connected_users': get_connected_users(),
         'transactions_per_minute': get_transactions_per_minute(),
         'total_transactions': get_total_transactions(),
-        'uptime_seconds': int(time.time() - start_time)
+        'uptime_seconds': int(time.time() - start_time),
+        'response_time_ms': get_average_response_time()
     })
 
 @app.route('/api/transaction', methods=['POST'])
