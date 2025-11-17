@@ -3,16 +3,16 @@
 REAL SERVER - Tracks Actual User Visits and Metrics
 Deploy this to Render.com to test with real data
 """
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import time
 import os
 import redis
+import hashlib
 from collections import defaultdict
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 CORS(app)
 
 # Track server start time
@@ -40,13 +40,21 @@ except:
 # REAL METRIC TRACKING FUNCTIONS
 # ==============================================================================
 
+def get_user_identifier():
+    """Create unique identifier from IP + User Agent"""
+    # Use IP address + browser user agent to identify unique users
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    if ip and ',' in ip:
+        ip = ip.split(',')[0].strip()  # Get first IP if multiple
+    user_agent = request.headers.get('User-Agent', 'unknown')
+    # Create a simple hash to identify unique browser+device combos
+    identifier = f"{ip}:{user_agent}"
+    user_id = hashlib.md5(identifier.encode()).hexdigest()[:12]
+    return user_id
+
 def track_user_visit():
     """Track a real user visit"""
-    # Get or create user ID from session
-    if 'user_id' not in session:
-        session['user_id'] = f"user_{int(time.time() * 1000)}"
-    
-    user_id = session['user_id']
+    user_id = get_user_identifier()
     timestamp = time.time()
     
     if USE_REDIS:
@@ -54,7 +62,10 @@ def track_user_visit():
         r.hset(f'user:{user_id}', 'last_seen', timestamp)
         r.expire(f'user:{user_id}', 300)  # 5 minutes
     else:
-        # Store in memory
+        # Store in memory - update existing user or add new
+        # Remove old entries for this user
+        visit_log[:] = [v for v in visit_log if v['user_id'] != user_id]
+        # Add new entry
         visit_log.append({'timestamp': timestamp, 'user_id': user_id})
         # Clean old visits (older than 5 minutes)
         cutoff = time.time() - 300
